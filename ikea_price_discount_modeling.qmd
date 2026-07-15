@@ -1,0 +1,573 @@
+---
+title: "Assignment Ikea"
+author: "Paloma Navarro"
+format: html
+editor: visual
+---
+
+# Assignment IKEA
+
+## Data 
+
+
+```{r}
+library(tidyverse)
+library(car)
+library(caret)
+library(glmnet)
+data_ikea <- read_csv(file = "./ikea_data.csv")
+```
+
+## Part 1- Explanatory Data Analysis (EDA)
+```{r}
+library(DataExplorer)
+plot_intro(data_ikea)
+```
+```{r}
+introduce (data_ikea)
+```
+The dataset contains 3,694 observations and 13 variables, including 5 continuous and 8 categorical variables. No missing values are present, indicating that the data has been preprocessed and is ready for modeling without the need for changes.
+
+```{r}
+plot_histogram(data_ikea)
+```
+The price variable exhibits a strong right-skewed distribution, indicating that most IKEA products are relatively inexpensive, with a small number of high-priced items. Similar skewness and the presence of outliers are observed in the physical dimensions (height, width, and depth), suggesting that transformations may be necessary prior to modeling. 
+
+```{r}
+plot_density(data_ikea)
+```
+```{r}
+plot_boxplot(data_ikea, by = "category")
+
+```
+Boxplots by product category reveal substantial differences in price and dimensions across furniture types. Categories such as sofas, wardrobes, and cabinets tend to have higher median prices and greater variability, while smaller furniture items generally exhibit lower prices. This suggests that category is an important predictor of price.
+
+```{r}
+plot_correlation(data_ikea, type = "continuous",
+                 title = "Pearson Correlation")
+
+#More robust correlation--> less sensitive to outliers 
+plot_correlation(data_ikea, type = "continuous", 
+                 cor_args = list(method = "spearman"),
+                 title = "Spearman Correlation")
+```
+The Spearman correlation matrix shows moderate to strong positive associations between price and product dimensions, particularly width, depth, and height. In contrast, item_id displays no meaningful correlation with any variable, confirming that it functions solely as an identifier and should be excluded from modeling.
+
+
+```{r}
+plot_bar(data_ikea)
+```
+The categorical variables show varying degrees of imbalance. Product `category` is unevenly distributed, with some categories appearing much more frequently than others. The variable `sellable_online` shows limited variability, while `other_colors` appears more balanced. These differences may influence their predictive contribution.
+
+```{r}
+plot_qq(data_ikea)
+```
+The QQ-plots indicate strong deviations from normality for all continuous variables, especially `price`. This violates the normality assumption required by classical linear regression models and further motivates the use of transformations and regularized modeling approaches.
+
+```{r}
+summary(data_ikea)
+```
+
+## Part 2- Feature Engineering 
+```{r}
+library(dplyr)
+library(stringr)
+
+data_featured <- data_ikea |> 
+  mutate(
+    #creating is_discounted variable for model 2. 
+    old_price_num = case_when(
+      old_price == "No old price" ~ NA_real_,
+      TRUE ~ old_price %>%
+        str_extract("\\d[\\d,]*\\.?\\d*") |>   
+        str_remove_all(",") |> 
+        as.numeric()
+    ),
+    
+    is_discounted = if_else(!is.na(old_price_num) & old_price_num > price, 1, 0),
+    is_discounted = factor(is_discounted, levels = c(0, 1), labels = c("No", "Yes")),
+    
+    # 2. making the target variable logarithmic to reduce skeweness 
+    log_price = log(price),
+    
+    
+    # 3. encoding categorical vars 
+    is_external_designer = factor(ifelse(str_detect(designer, "IKEA of Sweden"), 0, 1)),
+    category = factor(category),
+    other_colors = factor(other_colors),
+    sellable_online = factor(sellable_online)
+  ) |> 
+  select(
+    is_discounted, log_price, depth, height, width, 
+    category, other_colors, sellable_online, is_external_designer
+  )
+
+glimpse(data_featured)
+summary(data_featured)
+
+```
+Feature engineering to improve the model fit and create more significant variables:
+First I generate the target variable for the classification model `is_discounted` by cleaning the `old_price` column and comparing it against the current price.
+Second, I apply a logarithmic transformation to the target variable for the prediction model price (`log_price`) to reduce its positive skewness and bring the distribution closer to normality for the regression model.
+Finally, I encoded categorical variables as factors and derived a new feature, `is_external_designer`, to capture potential value differences between in-house IKEA designs and external collaborations.
+It is important to specify that scaling is not being done in this part, because standardization will be performed internally during model training (using the preProcess argument in caret). 
+
+## Part 3 - Model 1: Predicting price 
+
+```{r}
+library(tidyverse)
+library(caret)
+library(car)
+library(mctest)
+library(glmnet)
+
+set.seed(100562295)
+training.samples <- createDataPartition(data_featured$log_price, p = 0.8, list = FALSE)
+
+train.data <- data_featured[training.samples, ]
+test.data  <- data_featured[-training.samples, ]
+```
+
+To ensure the robustness of our models, I first split the dataset into training (80%) and testing (20%) sets using a stratified partition based on log_price.
+
+```{r}
+ctrl <- trainControl(
+  method = "cv",
+  number = 10
+)
+
+# Lambda grid 
+lambda_grid <- 10^seq(-3, 3, length = 100)
+
+```
+
+I Configure the training process using 10-fold Cross-Validation (CV). This technique splits the training data into 10 folds, training on 9 and validating on 1 iteratively, which helps prevent overfitting and provides a more reliable estimate of the error. Finally, I define a grid of lambda.
+
+```{r}
+library(mctest)
+
+model_lm <- lm(log_price ~ . - is_discounted, data = train.data)
+
+summary(model_lm)
+
+```
+The linear regression model demonstrates a robust fit, explaining approximately 71.1% of the variance in the `logarithmic price`. The results confirm that physical dimensions are the primary drivers of cost, all showing highly significant positive coefficients, meaning larger furniture is consistently more expensive. Among the categorical features,` sellable_online` acts as a strong positive predictor, suggesting that items available for online purchase have a significantly higher price point. Additionally, the availability of other_colors is associated with a modest price increase. The` is_external_designer` variable was not statistically significant, indicating that, once size and category are controlled for, products created by external collaborators do not carry a higher price.
+Nevertheless, I need to check the model assumptions and multicollinearity taking into account that during EDA was suggested that this dataset may not achieve the asumptions. 
+
+
+```{r}
+# 2. Diagnóstico de Multicolinealidad 
+omcdiag(model_lm) # Diagnóstico global
+imcdiag(model_lm) # VIF individual
+```
+The VIF values reveal issues of multicollinearity based on the `category` variable. The physical dimensions `depth`, `height`, `width` do not seem to have issues of multicollinearity. 
+
+Testing assumptions 
+```{r}
+# Testing linearity
+plot(model_lm, 1)
+
+# Testing normality of residuals
+plot(model_lm, 2)
+
+shapiro.test(residuals(model_lm)) # Ho: non normal 
+
+# Testing homoscedasticity
+plot(model_lm, 3)
+
+ncvTest(model_lm) # Ho: varianza constante
+
+# Check outliers and influential points (Cook's distance)
+plot(model_lm, 4)
+```
+The Non-constant Variance Score Test (p = 0.50) confirms that the log-transformation successfully stabilized the variance, satisfying the homoscedasticity assumption. However, the Shapiro-Wilk test (p < 0.05) and Q-Q plot reveal deviations from normality in the tails, indicating the model struggles with extreme price values. Given these violations, I considered regularized models more appropriate for this dataset. 
+
+
+Regularization lm models
+```{r}
+set.seed(100562295)
+model_ridge <- train(
+  log_price ~ ., data = train.data,
+  method = "glmnet",
+  tuneGrid = expand.grid(alpha = 0, lambda = lambda_grid),
+  trControl = ctrl,
+  preProcess = c("center", "scale")
+)
+model_ridge$bestTune
+
+```
+
+```{r}
+ridge_best_lambda <- model_ridge$bestTune$lambda
+ridge_coefficients <- coef(model_ridge$finalModel, s = ridge_best_lambda)
+
+ridge_coefficients
+
+model_ridge$finalModel$lambda
+```
+The Ridge regression model was trained with centering and scaling preprocessing to ensure fair comparison of coefficients. The optimal regularization parameter was identified as lambda = 0.086. The physical dimensions are the dominant price drivers. 
+
+```{r}
+set.seed(100562295)
+model_lasso <- train(
+  log_price ~ ., data = train.data,
+  method = "glmnet",
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda_grid),
+  trControl = ctrl,
+  preProcess = c("center", "scale")
+)
+
+model_lasso$bestTune
+```
+
+```{r}
+lasso_best_lambda <- model_lasso$bestTune$lambda
+lasso_coefficients <- coef(model_lasso$finalModel, s = lasso_best_lambda)
+
+lasso_coefficients
+```
+
+The Lasso regression model was trained in the same way as the Ridge. The optimal regularization parameter was identified as lambda = 0.0015. Lasso performed feature selection eliminating variables such as `category sofas & armchairs`. Once again, as in the Ridge model, physical features explain almost in total the pricing of items. 
+
+```{r}
+set.seed(100562295)
+model_elastic <- train(
+  log_price ~ ., data = train.data,
+  method = "glmnet",
+  tuneGrid = expand.grid(alpha = seq(0, 1, length = 10), lambda = lambda_grid),
+  trControl = ctrl,
+  preProcess = c("center", "scale")
+)
+model_elastic$bestTune
+```
+```{r}
+elastic_best_lambda <- model_elastic$bestTune$lambda
+elastic_coefficients <- coef(model_elastic$finalModel, s = elastic_best_lambda)
+
+elastic_coefficients
+```
+ElasticNet provides the same hyperparameters as Lasso model. 
+
+```{r}
+models_list <- list(
+  Ridge = model_ridge,
+  Lasso = model_lasso,
+  ElasticNet = model_elastic
+)
+
+
+resamples(models_list) |> 
+  summary()
+
+
+```
+The 10-fold cross-validation results demonstrate that Lasso and Elastic Net achieve identical top performance, with a Mean RMSE of 0.807 and an Rsquared of 70.9%. In comparison, Ridge regression performed slightly worse, with a higher Mean RMSE of 0.809. Given that Lasso yields the lowest error rate while simultaneously performing feature selection, it is selected as the optimal final model. It offers the best balance of predictive accuracy and model parsimony.
+
+Predictions 
+
+```{r}
+pred_lm     <- predict(model_lm, newdata = test.data)
+pred_ridge   <- predict(model_ridge, newdata = test.data)
+pred_lasso   <- predict(model_lasso, newdata = test.data)
+pred_elastic <- predict(model_elastic, newdata = test.data)
+
+metrics <- function(actual, predicted) {
+  c(
+    RMSE = RMSE(predicted, actual),
+    MAE  = MAE(predicted, actual),
+    Rsquared = R2(predicted, actual)
+  )
+}
+
+comparison_test <- data.frame(
+  LM     = metrics(test.data$log_price, pred_lm),
+  Ridge   = metrics(test.data$log_price, pred_ridge),
+  Lasso   = metrics(test.data$log_price, pred_lasso),
+  Elastic = metrics(test.data$log_price, pred_elastic)
+)
+
+comparison_test
+```
+
+The analysis identifies physical dimensions—specifically height, width, and depth—as the most decisive predictors of price, confirming that material volume is the primary cost driver. `sellable_online` also serves as a strong positive indicator of value, whereas the `is_external_designer` variable proved insignificant. Among the evaluated models, Lasso Regression emerged as the optimal choice; it achieved the best performance on the test set (RMSE: 0.7850) while effectively addressing severe multicollinearity by eliminating redundant features like 'Sofas'. However, the model is limited, having 29% of unexplained variance. Additionally, diagnostic tests reveal that the model struggles to accurately predict extreme outliers, suggesting that luxury or unique items do not follow the standard pricing rules.
+The differences among the four models are limited, demonstrating that the availability of predicting price with the existing dataset is limited. 
+
+## Part 4 - Classification model 
+
+```{r}
+
+df_class <- data_featured |> 
+  select(is_discounted, height, width, depth, 
+         category, other_colors, sellable_online, is_external_designer)
+
+set.seed(100562295)
+training.samples <- df_class$is_discounted %>% 
+  createDataPartition(p = 0.8, list = FALSE)
+
+train.class <- df_class[training.samples, ]
+test.class  <- df_class[-training.samples, ]
+```
+
+Adding to the classification model dataset the previously created variable `is_discounted`, based on the existing dataset variables `price`and `old_price`. Keeping the same explanatory variablles as in the previous model. 
+
+```{r}
+# Fit the model
+model_logit <- glm(is_discounted ~ ., data = train.class, family = binomial)
+summary(model_logit)
+
+```
+Because the target variable is a binary categorical variable -only two possible outcomes: discounted or not- I use a binomial logistic regression model. 
+```{r}
+# Coefficients interpretation (Odds Ratios)
+round(exp(coef(model_logit)), 2)
+```
+In this case, physical dimensions do not seem to have an impact on the odds for an item of being discounted. `chestofdrawers and drawer units`and `sellable_online`items seem to be the most likely to be discounted in comparison to the reference category -bar furniture-. Whereas `Nursery furnutire`and `cabinets and cupboards`seem to be the least likely to be discounted. 
+
+```{r}
+# 1. Calculating probabilities
+probabilities <- predict(model_logit, newdata = test.class, type = "response")
+
+# 2. Classifying
+predicted.classes <- ifelse(probabilities > 0.5, "Yes", "No")
+
+# 3. Converting into factor 
+predicted.classes <- factor(predicted.classes, levels = c("No", "Yes"))
+```
+Defining probabilities and converting the predicted classes as factors for the classification modelling. 
+
+```{r}
+library(tidyverse)
+
+train.class |> 
+  mutate(prob = ifelse(is_discounted == "Yes", 1, 0)) |> 
+  ggplot(aes(width, prob)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  labs(
+    title = "Logistic Regression Model (exploratory: width only)", 
+    x = "width",
+    y = "P(Discount = Yes)"
+    )
+
+```
+This plot visualizes the marginal relationship between product width and the probability of receiving a discount
+
+### Model Evaluation
+```{r}
+confusionMatrix(data = predicted.classes, reference = test.class$is_discounted, positive = "Yes")
+```
+The confusion matrix reveals that there is a paradox driven by class imbalance. While the model exhibits critically low Sensitivity (6.9%), correctly identifying only 9 out of 130 discounted items (121 False Negatives), it shows extremely high Specificity (99.8%) and strong Precision (90%), suggesting that while the model is highly conservative and rarely predicts a discount, it is accurate on the few occasions it does. Ultimately, the model fails in its primary task of detecting discounted items due to the overwhelming prevalence of non-discounted inventory.
+
+```{r}
+library(pROC)
+
+prob_test <- predict(model_logit, newdata = test.class, type = "response")
+roc_obj <- roc(response = test.class$is_discounted, predictor = prob_test, levels = c("No","Yes"))
+auc(roc_obj)
+ggroc(roc_obj)
+
+```
+The ROC curve indicates that the logistic model is able to distinguish discounted from non-discounted products better than random guessing (AUC ≈ 0.67), but its predictive power remains moderate. 
+
+### Regularized models
+
+```{r}
+ctrl <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+lambda_grid <- 10^seq(-4, 1, length = 100)
+
+```
+
+```{r}
+model_logistic_class <- train(
+ is_discounted ~ ., 
+  data = train.class, 
+  method = "glm",
+ family = "binomial",
+  trControl = ctrl,
+  metric = "ROC",
+  preProc = c("scale")
+ ) 
+
+model_logistic_class
+```
+
+```{r}
+model_ridge_class <- train(
+  is_discounted ~ .,
+  data = train.class,
+  method = "glmnet",
+  family = "binomial",
+  tuneGrid = expand.grid(alpha = 0, lambda = lambda_grid),
+  trControl = ctrl,
+  metric = "ROC",
+  preProcess = c("center", "scale")
+)
+model_ridge_class
+```
+At the optimal lambda of 0.3430, the model converged to a 'null' solution with a Sensitivity of 1.0 and Specificity of 0.0 (assuming 'No' is the reference class). This indicates that the regularization penalty forced the model to predict the majority class ('No Discount') for every single observation.
+
+```{r}
+model_lasso_class <- train(
+  is_discounted ~ .,
+  data = train.class,
+  method = "glmnet",
+  family = "binomial",
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda_grid),
+  trControl = ctrl,
+  metric = "ROC",
+  preProcess = c("center", "scale")
+)
+model_lasso_class
+```
+Similar to the Ridge model, Lasso fails to overcome the inherent class imbalance in the dataset. The low regularization parameter ( lambda = 0.001) suggests that shrinking coefficients does not improve class separation, and the model effectively defaults to the baseline behavior of the standard logistic regression, failing to reliably detect discounted items.
+
+```{r}
+model_elastic_class <- train(
+  is_discounted ~ .,
+  data = train.class,
+  method = "glmnet",
+  family = "binomial",
+  tuneGrid = expand.grid(
+    alpha = seq(0, 1, length = 10),
+    lambda = lambda_grid
+  ),
+  trControl = ctrl,
+  metric = "ROC",
+  preProcess = c("center", "scale")
+)
+
+model_elastic_class
+```
+Elastic Net provided a pure Ridge regression model. 
+
+```{r}
+models_class <- list(
+  Logistic = model_logistic_class,
+  Ridge = model_ridge_class,
+  Lasso = model_lasso_class,
+  ElasticNet = model_elastic_class
+)
+
+summary(resamples(models_class))
+
+```
+A comparative analysis of the resampling results reveals a consistent limitation across all linear models. The results confirm that regularization techniques alone (L1/L2 penalties) effectively force the models to predict the majority class to minimize error, rendering them ineffective for identifying discounted items without addressing the underlying class imbalance.
+ElasticNet seems to provide the best ROC of 0.69, but the problem is still the inneficacy to provide specificity. 
+
+```{r}
+# 1. Probabilities in the test set 
+prob_logit <- predict(model_logistic_class, test.class, type = "prob")$Yes
+prob_ridge <- predict(model_ridge_class, test.class, type = "prob")$Yes
+prob_lasso <- predict(model_lasso_class, test.class, type = "prob")$Yes
+prob_en    <- predict(model_elastic_class, test.class, type = "prob")$Yes
+
+# 2. AUC 
+library(pROC)
+auc_logit <- roc(test.class$is_discounted, prob_test)$auc
+auc_ridge <- roc(test.class$is_discounted, prob_ridge)$auc
+auc_lasso <- roc(test.class$is_discounted, prob_lasso)$auc
+auc_en    <- roc(test.class$is_discounted, prob_en)$auc
+
+# 3. Comparison
+comparison_clasification <- data.frame(
+  Model = c("Logistic", "Ridge", "Lasso", "Elastic Net"),
+  Test_AUC = c(auc_logit, auc_ridge, auc_lasso, auc_en)
+)
+
+print(comparison_clasification)
+```
+Upon evaluation on the test set, the Ridge Regression model achieved the highest performance followed closely by Elastic Net. The similarity between Lasso and the baseline Logistic model confirms that feature selection via L1 regularization offered no predictive advantage for this dataset. Conversely, the L2 regularization in Ridge provided a marginal improvement in ranking the probabilities of discounted items. However the models remain practically limited by the class imbalance, likely requiring a decision threshold adjustment or resampling techniques to convert this ranking ability into accurate classification of the minority class
+
+
+
+```{r}
+plot.roc(test.class$is_discounted, prob_logit, 
+         col="darkblue", # curve color
+         print.auc = TRUE,  # add auc value
+         auc.polygon=TRUE, # add auc shape
+         max.auc.polygon=TRUE,
+         auc.polygon.col="lightblue", # auc color
+         print.thres="best",
+         main = "Logit Model ROC Curve") # best thresholds
+
+plot.roc(test.class$is_discounted, prob_ridge, 
+         col="darkblue", # curve color
+         print.auc = TRUE,  # add auc value
+         auc.polygon=TRUE, # add auc shape
+         max.auc.polygon=TRUE,
+         auc.polygon.col="lightblue", # auc color
+         print.thres="best",
+         main = "Ridge Model ROC Curve")# best thresholds
+
+plot.roc(test.class$is_discounted, prob_lasso, 
+         col="darkblue", # curve color
+         print.auc = TRUE,  # add auc value
+         auc.polygon=TRUE, # add auc shape
+         max.auc.polygon=TRUE,
+         auc.polygon.col="lightblue", # auc color
+         print.thres="best",
+         main = "Lasso Model ROC Curve")# best thresholds
+
+plot.roc(test.class$is_discounted, prob_en, 
+         col="darkblue", # curve color
+         print.auc = TRUE,  # add auc value
+         auc.polygon=TRUE, # add auc shape
+         max.auc.polygon=TRUE,
+         auc.polygon.col="lightblue", # auc color
+         print.thres="best",
+         main = "ElasticNet Model ROC Curve")# best thresholds
+```
+Visual representation of ROC and AUC
+
+
+```{r}
+# 
+roc_ridge <- roc(test.class$is_discounted, prob_ridge)
+roc_lasso <- roc(test.class$is_discounted, prob_lasso)
+
+# Graficar comparativa
+ggroc(list(Logistic = roc_obj, Ridge = roc_ridge, Lasso = roc_lasso)) +
+  geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "grey") +
+  labs(title = "Comparison of ROC Curves", color = "Models") +
+  theme_minimal()
+```
+## Part 5: Conclusions 
+
+1. Key Insights from Regression and Classification Models:
+The analysis revealed a sharp contrast in our ability to predict continuous values versus binary outcomes using linear methods.
+
+Regression (Price Prediction): The modeling pipeline was highly effective. The Lasso Regression emerged as the optimal model, achieving an Rsquared of 71.2% and an RMSE of 0.785. Its key strength was parsimony; it matched the predictive power of Ridge and OLS but successfully performed feature selection, handling the dataset's multicollinearity by eliminating redundant variables. The logarithmic transformation of the variable `price`provided a much more effective prediction for the target variable. It helped the normalization of the target variable and stabilized homoscedasticity. 
+
+Classification (Discount Prediction): The classification model was not really effective. While Ridge Logistic Regression achieved the highest AUC (0.6816), the models suffered problems. Due to the severe class imbalance (only ~4% of items were discounted in the test set), all regularized models (Lasso, Ridge, Elastic Net) converged to a solution with 0% Specificity. They achieved high overall accuracy merely by predicting "No Discount" for every single item, rendering them practically useless for identifying actual offers without threshold adjustment.
+
+2. Differences: What drives Price vs. What drives Discounts? The factors influencing the base price of an item are fundamentally different from those that trigger a discount.
+Price is Physical: Price is driven by production costs. The strongest predictors were consistently` height, width, and depth`. The relationship is rational and linear: larger items require more material and logistics, thus costing more.
+Discounts are Strategic: Discounts are driven by inventory management, not physics. The Odds Ratios showed that physical size has no effect (OR = 1.00) on the likelihood of a discount. Instead, discounts are heavily concentrated in specific categories like "Chests of drawers" (OR = 4.79) and online-sellable items, likely representing stock clearance strategies. Conversely, "stable" demand categories like Nursery furniture are almost never discounted.
+
+3. Strengths and Weaknesses of the Modeling Pipeline
+Strengths:
+Robust Regularization: The use of glmnet (Lasso/Ridge) successfully managed the high multicollinearity present among the category dummy variables, which would have destabilized a standard OLS model.
+Rigorous Validation: The 10-fold cross-validation provided a reliable estimate of error, ensuring the models were not overfitting to the training data.
+Weaknesses:
+Handling Class Imbalance: The pipeline failed to address the scarcity of the "Discount = Yes" class. By not applying resampling techniques (like SMOTE, Upsampling, or Downsampling), the loss functions were dominated by the majority class, leading to models with high sensitivity but null specificity.
+Outlier Sensitivity: The regression residuals showed heavy tails, indicating the model under-predicts the prices of luxury/outlier items.
+
+4. What additional data could improve prediction?
+To bridge the gap from 71% to higher accuracy, and to fix the discount classification, the following data is crucial:
+Material Composition: This might be the "missing link" in price prediction. A material type variable would likely explain a significant portion of the remaining variance.
+Inventory & Seasonality: Discounts are temporal. Data on stock levels, season, and product age are needed to predict when an item will be discounted.
+Customer Reviews/Rating: Popularity metrics could help predict both price premiums and discounts.
+Geographic & Economic Context (Country Variable): Currently, the analysis is confined to a single market environment. Expanding the dataset to include a 'Country' variable would allow the model to account for global pricing disparities. 
+
+
+
+
+
+declaration of AI: I used them only as support for language clarity or to check R syntax, but all modeling decisions and interpretation are from its author Paloma Navarro.
+
